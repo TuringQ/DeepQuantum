@@ -8,9 +8,10 @@ from typing import Any, List, Optional, Tuple, Union
 import torch
 from torch import nn
 
+from .distributed import dist_one_targ_gate, dist_many_ctrl_one_targ_gate, dist_swap_gate
 from .operation import Gate
 from .qmath import multi_kron, is_unitary, svd
-
+from .state import DistributedQubitState
 
 class SingleGate(Gate):
     r"""A base class for single-qubit gates.
@@ -62,6 +63,16 @@ class SingleGate(Gate):
                 lst3[i] = oneone
             lst3[self.wires[0]] = matrix
             return multi_kron(lst1) - multi_kron(lst2) + multi_kron(lst3)
+
+    def op_dist_state(self, x: DistributedQubitState) -> DistributedQubitState:
+        """Perform a forward pass of a gate for a distributed state vector."""
+        target = self.nqubit - self.wires[0] - 1
+        matrix = self.update_matrix()
+        if len(self.controls) > 0:
+            controls = [self.nqubit - control - 1 for control in self.controls]
+            return dist_many_ctrl_one_targ_gate(x, controls, target, matrix)
+        else:
+            return dist_one_targ_gate(x, target, matrix)
 
 
 class DoubleGate(Gate):
@@ -1819,6 +1830,13 @@ class Swap(DoubleGate):
                                                      [0, 0, 1, 0],
                                                      [0, 1, 0, 0],
                                                      [0, 0, 0, 1]]) + 0j)
+
+    def op_dist_state(self, x: DistributedQubitState) -> DistributedQubitState:
+        """Perform a forward pass of a gate for a distributed state vector."""
+        if len(self.controls) > 0:
+            return super().op_dist_state(x)
+        else:
+            return dist_swap_gate(x, self.nqubit - self.wires[0] - 1, self.nqubit - self.wires[1] - 1)
 
     def _qasm(self) -> str:
         if self.condition:

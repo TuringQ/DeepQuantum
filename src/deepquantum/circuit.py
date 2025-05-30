@@ -14,6 +14,7 @@ from torch import nn, vmap
 
 from .channel import BitFlip, PhaseFlip, Depolarizing, Pauli, AmplitudeDamping, PhaseDamping
 from .channel import GeneralizedAmplitudeDamping
+from .distributed import measure_dist
 from .gate import ParametricSingleGate
 from .gate import U3Gate, PhaseShift, PauliX, PauliY, PauliZ, Hadamard, SGate, SDaggerGate, TGate, TDaggerGate
 from .gate import Rx, Ry, Rz, ProjectionJ, CNOT, Swap, Rxx, Ryy, Rzz, Rxy, ReconfigurableBeamSplitter, Toffoli, Fredkin
@@ -22,7 +23,7 @@ from .layer import Observable, U3Layer, XLayer, YLayer, ZLayer, HLayer, RxLayer,
 from .operation import Operation, Gate, Layer, Channel
 from .qmath import amplitude_encoding, measure, expectation, sample_sc_mcmc, sample2expval
 from .qmath import slice_state_vector, inner_product_mps, get_prob_mps
-from .state import QubitState, MatrixProductState
+from .state import QubitState, MatrixProductState, DistributedQubitState
 
 if TYPE_CHECKING:
     from .mbqc import Pattern
@@ -1298,3 +1299,79 @@ class QubitCircuit(Operation):
         """Add a barrier."""
         br = Barrier(nqubit=self.nqubit, wires=wires)
         self.add(br)
+
+
+class DistritubutedQubitCircuit(QubitCircuit):
+    def __init__(self, nqubit, name = None, reupload = False, shots = 1024):
+        super().__init__(nqubit=nqubit, init_state='zeros', name=name, den_mat=False,
+                         reupload=reupload, mps=False, chi=None, shots=shots)
+
+    def set_init_state(self, init_state: Union[str, DistributedQubitState] = 'zeros'):
+        """Set the initial state of the circuit."""
+        if init_state == 'zeros':
+            self.init_state = DistributedQubitState(self.nqubit)
+        elif isinstance(init_state, DistributedQubitState):
+            self.init_state = init_state
+
+    # pylint: disable=arguments-renamed
+    @torch.no_grad()
+    def forward(
+        self,
+        data: Optional[torch.Tensor] = None,
+        state: Optional[DistributedQubitState] = None
+    ) -> DistributedQubitState:
+        """Perform a forward pass of the quantum circuit and return the final state.
+
+        This method applies the ``operators`` of the quantum circuit to the initial state or the given state
+        and returns the resulting state. If ``data`` is given, it is used as the input for the ``encoders``.
+        The ``data`` must be a 1D tensor.
+
+        Args:
+            data (torch.Tensor or None, optional): The input data for the ``encoders``. Default: ``None``
+            state (DistributedQubitState or None, optional): The initial state for the quantum circuit.
+                Default: ``None``
+        """
+        if state is None:
+            self.init_state.reset()
+        else:
+            self.init_state = state
+        self.encode(data)
+        self.state = self.operators(self.init_state)
+        return self.state
+
+    def measure(
+        self,
+        shots: Optional[int] = None,
+        with_prob: bool = False,
+        wires: Union[int, List[int], None] = None,
+        block_size: int = 2 ** 24
+    ) -> Union[Dict, List[Dict], None]:
+        """Measure the final state.
+
+        Args:
+            shots (int or None, optional): The number of shots for the measurement. Default: ``None`` (which means
+                ``self.shots``)
+            with_prob (bool, optional): Whether to show the true probability of the measurement. Default: ``False``
+            wires (int, List[int] or None, optional): The wires to measure. Default: ``None`` (which means all wires)
+            block_size (int, optional): The block size for sampling. Default: 2 ** 24
+        """
+        if shots is None:
+            shots = self.shots
+        else:
+            self.shots = shots
+        if wires is None:
+            wires = list(range(self.nqubit))
+        self.wires_measure = self._convert_indices(wires)
+        if self.state is None:
+            return
+        else:
+            return measure_dist(self.state, shots=shots, with_prob=with_prob, wires=self.wires_measure,
+                                block_size=block_size)
+
+    def cnot(self, control: int, target: int) -> None:
+        """Add a CNOT gate."""
+        super().cx(control, target)
+
+    def toffoli(self, control1: int, control2: int, target: int) -> None:
+        """Add a Toffoli gate."""
+        super().ccx(control1, control2, target)
